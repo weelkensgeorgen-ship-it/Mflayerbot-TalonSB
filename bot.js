@@ -240,26 +240,42 @@ function nbtItemName(item) {
  * Returns plain strings with colour codes stripped.
  */
 function nbtItemLore(item) {
-  const lines = [];
-  try {
-    if (item.nbt) {
-      const simplified = nbt.simplify(item.nbt);
-      const loreArr    = simplified?.display?.Lore;
-      if (Array.isArray(loreArr)) {
-        for (const l of loreArr) {
-          if (ChatMessage) {
-            try {
-              const parsed = typeof l === "string" ? JSON.parse(l) : l;
-              lines.push(strip(new ChatMessage(parsed).toString()));
-              continue;
-            } catch {}
-          }
-          lines.push(strip(typeof l === "string" ? l : JSON.stringify(l)));
-        }
-      }
-    }
-  } catch {}
-  return lines.filter(Boolean);
+ const lines = [];
+
+ // Added modern support here. From what I underatand Minecraf entirely removed NBT tags and switched to "Data Components."
+ // The bot was crashing because item.nbt is null now. We have to read from item.customLore instead from the doc
+ if (item.customLore) {
+   for (const l of item.customLore) {
+     try {
+       const parsed = typeof l === "string" ? JSON.parse(l) : l;
+       if (ChatMessage) lines.push(strip(new ChatMessage(parsed).toString()));
+       else lines.push(strip(typeof l === "string" ? l : JSON.stringify(l)));
+     } catch {
+       lines.push(strip(l));
+     }
+   }
+ }
+
+ // Legacy Support
+ try {
+   if (item.nbt) {
+     const simplified = nbt.simplify(item.nbt);
+     const loreArr    = simplified?.display?.Lore;
+     if (Array.isArray(loreArr)) {
+       for (const l of loreArr) {
+         if (ChatMessage) {
+           try {
+             const parsed = typeof l === "string" ? JSON.parse(l) : l;
+             lines.push(strip(new ChatMessage(parsed).toString()));
+             continue;
+           } catch {}
+         }
+         lines.push(strip(typeof l === "string" ? l : JSON.stringify(l)));
+       }
+     }
+   }
+ } catch {}
+ return lines.filter(Boolean);
 }
 
 /**
@@ -339,7 +355,10 @@ function captureGui(command, waitMs = 8000) {
     let settleTimer = null;
 
     const finish = () => {
-      mcBot.removeListener("windowOpen", onWindow);
+      // Fixed a typo here that was causing a memory leak.
+      // This left permanent ghost listeners running every time a GUI opened, which broke all future GUI reads.
+      mcBot.removeListener("windowOpen", onWindowGuarded);
+
       if (lastWindow) {
         const items = parseWindowItems(lastWindow);
         try { mcBot.closeWindow(lastWindow); } catch {}
@@ -805,8 +824,8 @@ async function checkSkillsTop() {
       `\`\`\`\n${trimmed}\n\`\`\``,
       0xf97316,
       [{ name: "⚠️ Change detected", value: `Was: \`${prev || "—"}\`\nNow: \`${names}\`` }],
-      false,
-      commandChannel
+      // I removed the false and commandChannel arguments that used to be here
+      // It was forcing your message into the command channel instead of letting it default to the alerts channel
     );
   }
 }
@@ -1033,7 +1052,8 @@ async function scanIslandTop() {
   if (added.length) {
     saveData();
     const rows = added.map(f => `\`${f.name}\` (island #${f.rank})`).join(", ");
-    await sendEmbed("🗺️ Auto-Track Update", `Added **${added.length}** new players:\n${rows}`, 0x3b82f6, [], false, commandChannel);
+    // Removed commandChannel from here too
+    await sendEmbed("🗺️ Auto-Track Update", `Added **${added.length}** new players:\n${rows}`, 0x3b82f6);
   }
 
   // Post leaderboard with the same rich per-island embed style as istop.js
@@ -1059,8 +1079,8 @@ async function scanIslandTop() {
         inline: false,
       });
     }
-
-    await commandChannel?.send({ embeds: [embed] }).catch(console.error);
+    // Changed commandChannel to alertchannel
+    await alertChannel?.send({ embeds: [embed] }).catch(console.error);
   }
 }
 
