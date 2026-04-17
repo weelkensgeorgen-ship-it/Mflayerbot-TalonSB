@@ -702,12 +702,18 @@ function parseIsInfo(raw) {
 // ═══════════════════════════════════════════════════════════════
 
 function parseBal(raw) {
-  const matches = [...raw.matchAll(/\$([\d,.]+\s*[TBMK]?)/gi)];
-  if (matches.length) return parseMoney(matches[matches.length - 1][1]);
-  const m = raw.match(/([\d,.]+\s*[TBMK])\b/i);
-  return m ? parseMoney(m[1]) : 0;
+  // TalonMC bal format: "Name's Balance: ❙ Crop Coins: X ❙ Money: X ❙ ..."
+  // Split on ❙ and find the segment that starts with "Money:"
+  const segments = raw.split("❙").map(s => s.trim());
+  for (const seg of segments) {
+    const m = seg.match(/^Money:\s*([\d,.]+\s*[TBMK]?)/i);
+    if (m) return parseMoney(m[1]);
+  }
+  // Fallback: look for "Money:" anywhere without ❙ splitting
+  const fallback = raw.match(/Money:\s*([\d,.]+\s*[TBMK]?)/i);
+  if (fallback) return parseMoney(fallback[1]);
+  return 0;
 }
-
 // ═══════════════════════════════════════════════════════════════
 //  DISCORD HELPERS
 // ═══════════════════════════════════════════════════════════════
@@ -964,10 +970,13 @@ async function runPollLoop() {
       trackedPlayers.set(player, data);
 
       if (current > 0 && previous > 0 && previous > current) {
-        const dropped   = previous - current;
-        const key       = `bal_${player}`;
-        const lastAlert = alertCooldowns.get(key) || 0;
-        if (Date.now() - lastAlert > 300000) {
+        const dropped = previous - current;
+        const pct     = dropped / previous;
+        // Only alert if drop is 10% or more of previous balance
+        if (pct >= 0.10) {
+          const key = `bal_${player}`;
+          // 60s cooldown to prevent double-firing on same event, but no 5min block
+          if (Date.now() - (alertCooldowns.get(key) || 0) > 60000) {
           alertCooldowns.set(key, Date.now());
           stats.alertsSent++;
           data.depositHistory = data.depositHistory ?? [];
@@ -989,7 +998,7 @@ async function runPollLoop() {
         }
       }
       console.log(`[poll] bal ${player}: ${formatMoney(current)}`);
-    }
+    }}
 
     // ── Phase 3: /is info each player (once per hour) ────────────
     const isInfoKey  = "isinfo_cycle";
