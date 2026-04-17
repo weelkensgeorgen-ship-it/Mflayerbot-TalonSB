@@ -210,78 +210,81 @@ function createProxySocket(targetHost, targetPort) {
 //  Applied to BOTH /is top AND /invsee windows.
 // ═══════════════════════════════════════════════════════════════
 
+
+function extractTextFromJson(obj) {
+  if (!obj) return "";
+  if (typeof obj === "string") return obj;
+  let t = obj.text || "";
+  if (Array.isArray(obj.extra)) t += obj.extra.map(extractTextFromJson).join("");
+  if (Array.isArray(obj.with))  t += obj.with.map(extractTextFromJson).join("");
+  return t;
+}
+
+
 /**
  * Get the display name from a mineflayer item using NBT.
  * Falls back through customName → displayName → item.name.
  */
 function nbtItemName(item) {
+ let finalName = "";
  try {
    if (item.customName) {
      const parsed = typeof item.customName === "string" ? JSON.parse(item.customName) : item.customName;
-     if (ChatMessage) {
-       return strip(new ChatMessage(parsed).toString());
-     }
-     const text = parsed.text || "";
-     const extra = parsed.extra?.map(e => e.text || "").join("") || "";
-     return strip(text + extra);
+     if (ChatMessage) { try { finalName = new ChatMessage(parsed).toString(); } catch {} }
+     if (!finalName) finalName = extractTextFromJson(parsed);
+     if (!finalName && typeof item.customName === "string") finalName = item.customName;
    }
  } catch {}
 
- try {
-   if (item.nbt) {
-     const simplified = nbt.simplify(item.nbt);
-     const rawName    = simplified?.display?.Name;
-     if (rawName) {
-       if (ChatMessage) {
-         try {
-           const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
-           return strip(new ChatMessage(parsed).toString());
-         } catch {}
+ if (!finalName) {
+   try {
+     if (item.nbt) {
+       const simplified = nbt.simplify(item.nbt);
+       const rawName = simplified?.display?.Name;
+       if (rawName) {
+         if (ChatMessage) {
+           try {
+             const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
+             finalName = new ChatMessage(parsed).toString();
+           } catch {}
+         }
+         if (!finalName) finalName = extractTextFromJson(rawName);
+         if (!finalName) finalName = typeof rawName === "string" ? rawName : JSON.stringify(rawName);
        }
-       return strip(typeof rawName === "string" ? rawName : JSON.stringify(rawName));
      }
-   }
- } catch {}
-
-   return strip(item.displayName ?? item.name ?? "");
+   } catch {}
  }
+ return strip(finalName || item.displayName || item.name || "Unknown Item");
+}
 
-/**
- * Get lore lines from a mineflayer item using NBT.
- * Returns plain strings with colour codes stripped.
- */
 function nbtItemLore(item) {
  const lines = [];
-
- // Added modern support here. From what I underatand Minecraf entirely removed NBT tags and switched to "Data Components."
- // The bot was crashing because item.nbt is null now. We have to read from item.customLore instead from the doc
  if (item.customLore) {
    for (const l of item.customLore) {
      try {
        const parsed = typeof l === "string" ? JSON.parse(l) : l;
-       if (ChatMessage) lines.push(strip(new ChatMessage(parsed).toString()));
-       else lines.push(strip(typeof l === "string" ? l : JSON.stringify(l)));
-     } catch {
-       lines.push(strip(l));
-     }
+       let extracted = "";
+       if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
+       if (!extracted) extracted = extractTextFromJson(parsed);
+       if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
+       lines.push(strip(extracted));
+     } catch { lines.push(strip(l)); }
    }
  }
-
- // Legacy Support
  try {
    if (item.nbt) {
      const simplified = nbt.simplify(item.nbt);
      const loreArr    = simplified?.display?.Lore;
      if (Array.isArray(loreArr)) {
        for (const l of loreArr) {
-         if (ChatMessage) {
-           try {
-             const parsed = typeof l === "string" ? JSON.parse(l) : l;
-             lines.push(strip(new ChatMessage(parsed).toString()));
-             continue;
-           } catch {}
-         }
-         lines.push(strip(typeof l === "string" ? l : JSON.stringify(l)));
+         try {
+           const parsed = typeof l === "string" ? JSON.parse(l) : l;
+           let extracted = "";
+           if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
+           if (!extracted) extracted = extractTextFromJson(parsed);
+           if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
+           lines.push(strip(extracted));
+         } catch { lines.push(strip(l)); }
        }
      }
    }
@@ -420,71 +423,66 @@ function captureGui(command, waitMs = 8000) {
   * Smart capture — races chat vs GUI. Whichever fires first wins.
   */
 function capture(command, waitMs = 6000) {
- return new Promise(resolve => {
-   if (!mcBot || !mcReady) return resolve({ type: "chat", text: "(bot not connected)" });
+  return new Promise(resolve => {
+    if (!mcBot || !mcReady) return resolve({ type: "chat", text: "(bot not connected)" });
 
-   let done = false;
-   const finish = result => { if (!done) { done = true; resolve(result); } };
+    let done = false;
+    const finish = result => { if (!done) { done = true; resolve(result); } };
 
-   const lines = [];
-   let chatTimer;
-   let lastWindow = null;
-   let guiSettleTimer = null;
+    const lines = [];
+    let chatTimer;
+    let lastWindow = null;
+    let guiSettleTimer = null;
 
-   const onMsg = (msgStr) => {
-     const text = strip(msgStr);
-     if (!text) return;
-     lines.push(text);
-     clearTimeout(chatTimer);
-     chatTimer = setTimeout(() => {
-       mcBot.removeListener("messagestr", onMsg);
-       mcBot.removeListener("windowOpen", onWindow);
-       clearTimeout(guiSettleTimer);
-       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-     }, 700);
-   };
+    const onMsg = (msgStr) => {
+      const text = strip(msgStr);
+      if (!text) return;
+      lines.push(text);
+      clearTimeout(chatTimer);
+      chatTimer = setTimeout(() => {
+        mcBot.removeListener("messagestr", onMsg);
+        mcBot.removeListener("windowOpen", onWindow);
+        clearTimeout(guiSettleTimer);
+        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+      }, 700);
+    };
 
-   const finaliseGui = () => {
-     mcBot.removeListener("messagestr", onMsg);
-     mcBot.removeListener("windowOpen", onWindow);
-     clearTimeout(chatTimer);
-     if (lastWindow) {
-       const items = parseWindowItems(lastWindow);
-       try { mcBot.closeWindow(lastWindow); } catch {}
-       finish({ type: "gui", items });
-     } else {
-       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-     }
-   };
+    const finaliseGui = () => {
+      mcBot.removeListener("messagestr", onMsg);
+      mcBot.removeListener("windowOpen", onWindow);
+      clearTimeout(chatTimer);
+      if (lastWindow) {
+        const items = parseWindowItems(lastWindow);
+        try { mcBot.closeWindow(lastWindow); } catch {}
+        finish({ type: "gui", items });
+      } else {
+        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+      }
+    };
 
-   const onWindow = window => {
-     clearTimeout(chatTimer);
-     mcBot.removeListener("messagestr", onMsg);
-     lastWindow = window;
-     clearTimeout(guiSettleTimer);
-     guiSettleTimer = setTimeout(finaliseGui, 900);
-     mcBot.once("windowOpen", w => {
-       lastWindow = w;
-       clearTimeout(guiSettleTimer);
-       guiSettleTimer = setTimeout(finaliseGui, 900);
-     });
-   };
+    const onWindow = window => {
+      clearTimeout(chatTimer);
+      mcBot.removeListener("messagestr", onMsg);
+      lastWindow = window;
+      clearTimeout(guiSettleTimer);
+      guiSettleTimer = setTimeout(finaliseGui, 900);
+    };
 
-   mcBot.on("messagestr", onMsg);
-   mcBot.on("windowOpen", onWindow);
-   mcBot.chat(command);
+    mcBot.on("messagestr", onMsg);
+    mcBot.on("windowOpen", onWindow);
+    mcBot.chat(command);
 
-   setTimeout(() => {
-     mcBot.removeListener("messagestr", onMsg);
-     mcBot.removeListener("windowOpen", onWindow);
-     clearTimeout(guiSettleTimer);
-     if (lastWindow && !done) {
-       finaliseGui();
-     } else {
-       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-     }
-   }, waitMs);
- });
+    setTimeout(() => {
+      mcBot.removeListener("messagestr", onMsg);
+      mcBot.removeListener("windowOpen", onWindow);
+      clearTimeout(guiSettleTimer);
+      if (lastWindow && !done) {
+        finaliseGui();
+      } else {
+        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+      }
+    }, waitMs);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
