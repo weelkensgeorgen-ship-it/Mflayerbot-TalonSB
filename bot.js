@@ -73,6 +73,15 @@ const stats = {
   startTime:   Date.now(),
 };
 
+function clearAllTimers() {
+  clearTimeout(islandScanTimeout);
+  clearInterval(islandScanInterval);
+  clearTimeout(skillsTopTimeout);
+  clearInterval(skillsTopInterval);
+  clearInterval(antiAfkInterval1);
+  clearInterval(antiAfkInterval2);
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  PERSISTENCE
 // ═══════════════════════════════════════════════════════════════
@@ -1109,6 +1118,14 @@ function scheduleReconnect(delay = 30000) {
 
 async function createMcBot() {
   console.log("[mc] Connecting...");
+
+  if (mcBot) {
+    try { mcBot.removeAllListeners(); } catch (e) {}
+    try { mcBot.quit(); } catch (e) {}
+    mcBot = null;
+  }
+  clearAllTimers();
+
   inSkyblock = false;
   mcReady    = false;
 
@@ -1216,12 +1233,13 @@ async function createMcBot() {
     console.warn("[mc] Kicked:", clean);
     const delay = ["hub","restart","maintenance","lobby"].some(s => clean.toLowerCase().includes(s)) ? 15000 : 30000;
     sendEmbed("⚠️ Bot Kicked", `${clean}\n\nReconnecting in ${delay / 1000}s...`, 0xef4444, [], false, commandChannel);
-    setTimeout(createMcBot, delay);
+    scheduleReconnect(delay);
     stats.reconnects++;
   });
 
   mcBot.on("end", () => {
     mcReady = false; inSkyblock = false;
+    clearAllTimers();
     console.log("[mc] Disconnected.");
     scheduleReconnect(30000);
     stats.reconnects++;
@@ -1335,9 +1353,12 @@ discord.on("messageCreate", async msg => {
 
   if (cmd === "reconnect") {
     await replyEmbed(msg, "🔄 Reconnecting", "Forcing Minecraft reconnect...", 0xf5a623);
-    mcReady = false; pollLoopActive = false;
-    mcBot?.end();
-    setTimeout(createMcBot, 2000);
+    mcReady = false;
+    inSkyblock = false;
+
+    if (mcBot) mcBot.quit();
+    else scheduleReconnect(2000);
+
     return;
   }
 
