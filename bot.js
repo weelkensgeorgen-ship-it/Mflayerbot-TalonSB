@@ -52,6 +52,13 @@ let pollLoopActive = false;
 let pollPaused     = false;
 let reconnectTimer = null;
 
+let islandScanTimeout  = null;
+let islandScanInterval = null;
+let skillsTopTimeout   = null;
+let skillsTopInterval  = null;
+let antiAfkInterval1   = null;
+let antiAfkInterval2   = null;
+
 // Cached prismarine-chat constructor (set once bot version is known)
 let ChatMessage    = null;
 
@@ -316,30 +323,31 @@ function parseWindowItems(window) {
  * Chat-only capture. Resolves with a string.
  */
 function captureOnlyChat(command, waitMs = 3500) {
-  return new Promise(resolve => {
-    if (!mcBot || !mcReady) return resolve("(bot not connected)");
-    const lines = [];
-    let timer;
+ return new Promise(resolve => {
+   if (!mcBot || !mcReady) return resolve("(bot not connected)");
+   const lines = [];
+   let timer;
 
-    const onMsg = json => {
-      const text = strip(json.toString());
-      if (!text) return;
-      lines.push(text);
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        mcBot.removeListener("message", onMsg);
-        resolve(lines.join("\n") || "(no output)");
-      }, 700);
-    };
+   // Changed from json to msgStr
+   const onMsg = (msgStr) => {
+     const text = strip(msgStr);
+     if (!text) return;
+     lines.push(text);
+     clearTimeout(timer);
+     timer = setTimeout(() => {
+       mcBot.removeListener("messagestr", onMsg);
+       resolve(lines.join("\n") || "(no output)");
+     }, 700);
+   };
 
-    mcBot.on("message", onMsg);
-    mcBot.chat(command);
+   mcBot.on("messagestr", onMsg);
+   mcBot.chat(command);
 
-    setTimeout(() => {
-      mcBot.removeListener("message", onMsg);
-      resolve(lines.join("\n") || "(no output)");
-    }, waitMs);
-  });
+   setTimeout(() => {
+     mcBot.removeListener("messagestr", onMsg);
+     resolve(lines.join("\n") || "(no output)");
+   }, waitMs);
+ });
 }
 
 /**
@@ -404,75 +412,75 @@ function captureGui(command, waitMs = 8000) {
  * Used by ?<command> to handle any command transparently.
  * GUI path waits for settle (no new windowOpen within 900ms) so /pv, /invsee etc. fully populate.
  */
+ /**
+  * Smart capture — races chat vs GUI. Whichever fires first wins.
+  */
 function capture(command, waitMs = 6000) {
-  return new Promise(resolve => {
-    if (!mcBot || !mcReady) return resolve({ type: "chat", text: "(bot not connected)" });
+ return new Promise(resolve => {
+   if (!mcBot || !mcReady) return resolve({ type: "chat", text: "(bot not connected)" });
 
-    let done = false;
-    const finish = result => { if (!done) { done = true; resolve(result); } };
+   let done = false;
+   const finish = result => { if (!done) { done = true; resolve(result); } };
 
-    const lines = [];
-    let chatTimer;
-    let lastWindow = null;
-    let guiSettleTimer = null;
+   const lines = [];
+   let chatTimer;
+   let lastWindow = null;
+   let guiSettleTimer = null;
 
-    const onMsg = json => {
-      const text = strip(json.toString());
-      if (!text) return;
-      lines.push(text);
-      clearTimeout(chatTimer);
-      chatTimer = setTimeout(() => {
-        mcBot.removeListener("message", onMsg);
-        mcBot.removeListener("windowOpen", onWindow);
-        clearTimeout(guiSettleTimer);
-        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-      }, 700);
-    };
+   const onMsg = (msgStr) => {
+     const text = strip(msgStr);
+     if (!text) return;
+     lines.push(text);
+     clearTimeout(chatTimer);
+     chatTimer = setTimeout(() => {
+       mcBot.removeListener("messagestr", onMsg);
+       mcBot.removeListener("windowOpen", onWindow);
+       clearTimeout(guiSettleTimer);
+       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+     }, 700);
+   };
 
-    const finaliseGui = () => {
-      mcBot.removeListener("message", onMsg);
-      mcBot.removeListener("windowOpen", onWindow);
-      clearTimeout(chatTimer);
-      if (lastWindow) {
-        const items = parseWindowItems(lastWindow);
-        try { mcBot.closeWindow(lastWindow); } catch {}
-        finish({ type: "gui", items });
-      } else {
-        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-      }
-    };
+   const finaliseGui = () => {
+     mcBot.removeListener("messagestr", onMsg);
+     mcBot.removeListener("windowOpen", onWindow);
+     clearTimeout(chatTimer);
+     if (lastWindow) {
+       const items = parseWindowItems(lastWindow);
+       try { mcBot.closeWindow(lastWindow); } catch {}
+       finish({ type: "gui", items });
+     } else {
+       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+     }
+   };
 
-    const onWindow = window => {
-      // Cancel any pending chat resolve — GUI takes priority
-      clearTimeout(chatTimer);
-      mcBot.removeListener("message", onMsg);
-      lastWindow = window;
-      // Settle: if another window opens quickly (e.g. loading → real), restart timer
-      clearTimeout(guiSettleTimer);
-      guiSettleTimer = setTimeout(finaliseGui, 900);
-      // Re-register to catch replacement windows
-      mcBot.once("windowOpen", w => {
-        lastWindow = w;
-        clearTimeout(guiSettleTimer);
-        guiSettleTimer = setTimeout(finaliseGui, 900);
-      });
-    };
+   const onWindow = window => {
+     clearTimeout(chatTimer);
+     mcBot.removeListener("messagestr", onMsg);
+     lastWindow = window;
+     clearTimeout(guiSettleTimer);
+     guiSettleTimer = setTimeout(finaliseGui, 900);
+     mcBot.once("windowOpen", w => {
+       lastWindow = w;
+       clearTimeout(guiSettleTimer);
+       guiSettleTimer = setTimeout(finaliseGui, 900);
+     });
+   };
 
-    mcBot.on("message", onMsg);
-    mcBot.on("windowOpen", onWindow);
-    mcBot.chat(command);
+   mcBot.on("messagestr", onMsg);
+   mcBot.on("windowOpen", onWindow);
+   mcBot.chat(command);
 
-    setTimeout(() => {
-      mcBot.removeListener("message", onMsg);
-      mcBot.removeListener("windowOpen", onWindow);
-      clearTimeout(guiSettleTimer);
-      if (lastWindow && !done) {
-        finaliseGui();
-      } else {
-        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-      }
-    }, waitMs);
-  });
+   setTimeout(() => {
+     mcBot.removeListener("messagestr", onMsg);
+     mcBot.removeListener("windowOpen", onWindow);
+     clearTimeout(guiSettleTimer);
+     if (lastWindow && !done) {
+       finaliseGui();
+     } else {
+       finish({ type: "chat", text: lines.join("\n") || "(no output)" });
+     }
+   }, waitMs);
+ });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1150,20 +1158,22 @@ async function createMcBot() {
         );
 
         // Anti-AFK
-        setInterval(() => { if (mcReady && inSkyblock) mcBot.swingArm(); }, 55000);
-        setInterval(() => {
-          if (!mcReady || !inSkyblock) return;
+        antiAfkInterval1 = setInterval(() => { if (mcReady && inSkyblock && mcBot) mcBot.swingArm(); }, 55000);
+        antiAfkInterval2 = setInterval(() => {
+          if (!mcReady || !inSkyblock || !mcBot) return;
           mcBot.setControlState("jump", true);
           setTimeout(() => mcBot?.setControlState("jump", false), 400);
         }, 180000 + Math.random() * 120000);
 
         // Scheduled tasks
-        setTimeout(scanIslandTop, 20000);
-        setInterval(scanIslandTop, 60 * 60 * 1000);
+        islandScanTimeout = setTimeout(() => {
+          scanIslandTop();
+          islandScanInterval = setInterval(scanIslandTop, 60 * 60 * 1000);
+        }, 20000);
 
-        setTimeout(() => {
+        skillsTopTimeout = setTimeout(() => {
           checkSkillsTop();
-          setInterval(checkSkillsTop, SKILLS_INTERVAL);
+          skillsTopInterval = setInterval(checkSkillsTop, SKILLS_INTERVAL);
         }, 35000);
 
         runPollLoop();
@@ -1172,8 +1182,8 @@ async function createMcBot() {
   });
 
   // MC → Discord chat bridge (goes to logChannel)
-  mcBot.on("message", json => {
-    const text = strip(json.toString());
+  mcBot.on("messagestr", (msgStr) => {
+    const text = strip(msgStr);
     if (!text || !logChannel) return;
     logChannel.send(`💬 \`${text}\``).catch(() => {});
 
