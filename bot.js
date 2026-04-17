@@ -58,9 +58,12 @@ let skillsTopTimeout   = null;
 let skillsTopInterval  = null;
 let antiAfkInterval1   = null;
 let antiAfkInterval2   = null;
+let isTopAutoInterval  = null;   // for ?is top co_op [N]
 
-// Cached prismarine-chat constructor (set once bot version is known)
-let ChatMessage    = null;
+let ChatMessage = null;
+
+// Track the current #1 island name so we can detect changes
+let topIslandName = null;
 
 const trackedPlayers   = new Map();
 const alertCooldowns   = new Map();
@@ -80,6 +83,8 @@ function clearAllTimers() {
   clearInterval(skillsTopInterval);
   clearInterval(antiAfkInterval1);
   clearInterval(antiAfkInterval2);
+  clearInterval(isTopAutoInterval);
+  isTopAutoInterval = null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -213,115 +218,100 @@ function createProxySocket(targetHost, targetPort) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  NBT ITEM PARSER
-//  (Ported from istop.js — uses prismarine-nbt for reliable
-//   lore/name extraction from any chest GUI window.)
-//  Applied to BOTH /is top AND /invsee windows.
+//  NBT TEXT EXTRACTION
 // ═══════════════════════════════════════════════════════════════
-
 
 function extractTextFromJson(obj) {
   if (obj === null || obj === undefined) return "";
   if (typeof obj === "string" || typeof obj === "number") return String(obj);
-
-  if (obj.type !== undefined && obj.value !== undefined) {
-    return extractTextFromJson(obj.value);
-  }
-
+  if (obj.type !== undefined && obj.value !== undefined) return extractTextFromJson(obj.value);
   let t = "";
-
-  if (Array.isArray(obj)) {
-    return obj.map(extractTextFromJson).join("");
-  }
-
-  if (obj.text !== undefined) t += extractTextFromJson(obj.text);
-
-  if (obj[""] !== undefined) t += extractTextFromJson(obj[""]);
-
+  if (Array.isArray(obj)) return obj.map(extractTextFromJson).join("");
+  if (obj.text  !== undefined) t += extractTextFromJson(obj.text);
+  if (obj[""]   !== undefined) t += extractTextFromJson(obj[""]);
   if (obj.extra !== undefined) t += extractTextFromJson(obj.extra);
-
-  if (obj.with !== undefined) t += extractTextFromJson(obj.with);
-
+  if (obj.with  !== undefined) t += extractTextFromJson(obj.with);
   return t;
 }
 
-
-/**
- * Get the display name from a mineflayer item using NBT.
- * Falls back through customName → displayName → item.name.
- */
 function nbtItemName(item) {
- let finalName = "";
- try {
-   if (item.customName) {
-     const parsed = typeof item.customName === "string" ? JSON.parse(item.customName) : item.customName;
-     if (ChatMessage) { try { finalName = new ChatMessage(parsed).toString(); } catch {} }
-     if (!finalName) finalName = extractTextFromJson(parsed);
-     if (!finalName && typeof item.customName === "string") finalName = item.customName;
-   }
- } catch {}
+  let finalName = "";
+  try {
+    if (item.customName) {
+      const parsed = typeof item.customName === "string" ? JSON.parse(item.customName) : item.customName;
+      if (ChatMessage) { try { finalName = new ChatMessage(parsed).toString(); } catch {} }
+      if (!finalName) finalName = extractTextFromJson(parsed);
+      if (!finalName && typeof item.customName === "string") finalName = item.customName;
+    }
+  } catch {}
 
- if (!finalName) {
-   try {
-     if (item.nbt) {
-       const simplified = nbt.simplify(item.nbt);
-       const rawName = simplified?.display?.Name;
-       if (rawName) {
-         if (ChatMessage) {
-           try {
-             const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
-             finalName = new ChatMessage(parsed).toString();
-           } catch {}
-         }
-         if (!finalName) finalName = extractTextFromJson(rawName);
-         if (!finalName) finalName = typeof rawName === "string" ? rawName : JSON.stringify(rawName);
-       }
-     }
-   } catch {}
- }
- return strip(finalName || item.displayName || item.name || "Unknown Item");
+  if (!finalName) {
+    try {
+      if (item.nbt) {
+        const simplified = nbt.simplify(item.nbt);
+        const rawName = simplified?.display?.Name;
+        if (rawName) {
+          if (ChatMessage) {
+            try {
+              const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
+              finalName = new ChatMessage(parsed).toString();
+            } catch {}
+          }
+          if (!finalName) finalName = extractTextFromJson(rawName);
+          if (!finalName) finalName = typeof rawName === "string" ? rawName : JSON.stringify(rawName);
+        }
+      }
+    } catch {}
+  }
+  return strip(finalName || item.displayName || item.name || "");
 }
 
 function nbtItemLore(item) {
- const lines = [];
- if (item.customLore) {
-   for (const l of item.customLore) {
-     try {
-       const parsed = typeof l === "string" ? JSON.parse(l) : l;
-       let extracted = "";
-       if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
-       if (!extracted) extracted = extractTextFromJson(parsed);
-       if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
-       lines.push(strip(extracted));
-     } catch { lines.push(strip(l)); }
-   }
- }
- try {
-   if (item.nbt) {
-     const simplified = nbt.simplify(item.nbt);
-     const loreArr    = simplified?.display?.Lore;
-     if (Array.isArray(loreArr)) {
-       for (const l of loreArr) {
-         try {
-           const parsed = typeof l === "string" ? JSON.parse(l) : l;
-           let extracted = "";
-           if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
-           if (!extracted) extracted = extractTextFromJson(parsed);
-           if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
-           lines.push(strip(extracted));
-         } catch { lines.push(strip(l)); }
-       }
-     }
-   }
- } catch {}
- return lines.filter(Boolean);
+  const lines = [];
+  if (item.customLore) {
+    for (const l of item.customLore) {
+      try {
+        const parsed = typeof l === "string" ? JSON.parse(l) : l;
+        let extracted = "";
+        if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
+        if (!extracted) extracted = extractTextFromJson(parsed);
+        if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
+        const s = strip(extracted);
+        if (s) lines.push(s);
+      } catch { const s = strip(l); if (s) lines.push(s); }
+    }
+  }
+  try {
+    if (item.nbt) {
+      const simplified = nbt.simplify(item.nbt);
+      const loreArr    = simplified?.display?.Lore;
+      if (Array.isArray(loreArr)) {
+        for (const l of loreArr) {
+          try {
+            const parsed = typeof l === "string" ? JSON.parse(l) : l;
+            let extracted = "";
+            if (ChatMessage) { try { extracted = new ChatMessage(parsed).toString(); } catch {} }
+            if (!extracted) extracted = extractTextFromJson(parsed);
+            if (!extracted) extracted = typeof l === "string" ? l : JSON.stringify(l);
+            const s = strip(extracted);
+            if (s) lines.push(s);
+          } catch { const s = strip(l); if (s) lines.push(s); }
+        }
+      }
+    }
+  } catch {}
+  return lines;
 }
 
-/**
- * Parse all useful items from an open mineflayer window.
- * Only reads slots below inventoryStart (chest contents, not player inv).
- */
-function parseWindowItems(window) {
+// ═══════════════════════════════════════════════════════════════
+//  WINDOW ITEM PARSER
+//
+//  Only keeps slots that have BOTH a name AND lore.
+//  This filters out decorative filler items (glass panes, barriers,
+//  arrows, etc.) which have no lore and carry no useful data.
+// ═══════════════════════════════════════════════════════════════
+
+function parseWindowItems(window, requireLore = false) {
   const results = [];
   const limit   = window.inventoryStart ?? window.slots.length;
 
@@ -333,9 +323,15 @@ function parseWindowItems(window) {
     if (!name) continue;
 
     const lore  = nbtItemLore(item);
+
+    // When requireLore is true (used for /is top), skip items with no lore.
+    // Filler decorators (glass panes, barriers, black stained glass) never
+    // have lore, so this cleanly removes them without needing to hard-code
+    // item type IDs.
+    if (requireLore && lore.length === 0) continue;
+
     const count = item.count ?? 1;
 
-    // Skull owner ID — used for player head thumbnails in /is top
     let skullId = null;
     try {
       const simplified = nbt.simplify(item.nbt);
@@ -351,80 +347,61 @@ function parseWindowItems(window) {
 //  CAPTURE HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Chat-only capture. Resolves with a string.
- */
 function captureOnlyChat(command, waitMs = 3500) {
- return new Promise(resolve => {
-   if (!mcBot || !mcReady) return resolve("(bot not connected)");
-   const lines = [];
-   let timer;
+  return new Promise(resolve => {
+    if (!mcBot || !mcReady) return resolve("(bot not connected)");
+    const lines = [];
+    let timer;
 
-   // Changed from json to msgStr
-   const onMsg = (msgStr) => {
-     const text = strip(msgStr);
-     if (!text) return;
-     lines.push(text);
-     clearTimeout(timer);
-     timer = setTimeout(() => {
-       mcBot.removeListener("messagestr", onMsg);
-       resolve(lines.join("\n") || "(no output)");
-     }, 700);
-   };
+    const onMsg = (msgStr) => {
+      const text = strip(msgStr);
+      if (!text) return;
+      lines.push(text);
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        mcBot.removeListener("messagestr", onMsg);
+        resolve(lines.join("\n") || "(no output)");
+      }, 700);
+    };
 
-   mcBot.on("messagestr", onMsg);
-   mcBot.chat(command);
+    mcBot.on("messagestr", onMsg);
+    mcBot.chat(command);
 
-   setTimeout(() => {
-     mcBot.removeListener("messagestr", onMsg);
-     resolve(lines.join("\n") || "(no output)");
-   }, waitMs);
- });
+    setTimeout(() => {
+      mcBot.removeListener("messagestr", onMsg);
+      resolve(lines.join("\n") || "(no output)");
+    }, waitMs);
+  });
 }
 
-/**
- * GUI-only capture. Resolves with parsed item array.
- * Waits for the window to settle (no new windowOpen within 800ms) so that
- * servers that open a loading screen then replace it with the real GUI work correctly.
- */
-function captureGui(command, waitMs = 8000) {
+// GUI capture — waits for window to settle (handles loading-screen replacements)
+// Pass requireLore=true for /is top so filler slots are discarded.
+function captureGui(command, waitMs = 8000, requireLore = false) {
   return new Promise(resolve => {
     if (!mcBot || !mcReady) return resolve([]);
 
-    let lastWindow = null;
+    let lastWindow  = null;
     let settleTimer = null;
 
     const finish = () => {
-      // Fixed a typo here that was causing a memory leak.
-      // This left permanent ghost listeners running every time a GUI opened, which broke all future GUI reads.
       mcBot.removeListener("windowOpen", onWindowGuarded);
-
       if (lastWindow) {
-        const items = parseWindowItems(lastWindow);
+        const items = parseWindowItems(lastWindow, requireLore);
         try { mcBot.closeWindow(lastWindow); } catch {}
-        console.log(`[gui] ${command} → ${items.length} items`);
+        console.log(`[gui] ${command} → ${items.length} items (requireLore=${requireLore})`);
         resolve(items);
       } else {
         resolve([]);
       }
     };
 
-    const onWindow = window => {
-      lastWindow = window;
-      // Reset settle timer on every new window — the real GUI replaces placeholder
-      clearTimeout(settleTimer);
-      settleTimer = setTimeout(finish, 900);
+    const globalTimer = setTimeout(finish, waitMs);
+
+    const guardedFinish = () => {
+      clearTimeout(globalTimer);
+      finish();
     };
 
-    const globalTimer = setTimeout(() => {
-      clearTimeout(settleTimer);
-      finish();
-    }, waitMs);
-
-    // Wrap finish to also clear globalTimer
-    const originalFinish = finish;
-    const guardedFinish = () => { clearTimeout(globalTimer); originalFinish(); };
-    // Patch the settle timer to use guarded finish
     const onWindowGuarded = window => {
       lastWindow = window;
       clearTimeout(settleTimer);
@@ -432,21 +409,11 @@ function captureGui(command, waitMs = 8000) {
     };
 
     mcBot.on("windowOpen", onWindowGuarded);
-    // Override the unguarded listener reference so finish() removes the right one
-    mcBot.removeListener("windowOpen", onWindow); // remove the stub added above (no-op)
     mcBot.chat(command);
   });
 }
 
-/**
- * Smart capture — races chat vs GUI. Whichever fires first wins.
- * Returns { type: "chat", text } or { type: "gui", items }.
- * Used by ?<command> to handle any command transparently.
- * GUI path waits for settle (no new windowOpen within 900ms) so /pv, /invsee etc. fully populate.
- */
- /**
-  * Smart capture — races chat vs GUI. Whichever fires first wins.
-  */
+// Smart capture — races chat vs GUI
 function capture(command, waitMs = 6000) {
   return new Promise(resolve => {
     if (!mcBot || !mcReady) return resolve({ type: "chat", text: "(bot not connected)" });
@@ -456,7 +423,7 @@ function capture(command, waitMs = 6000) {
 
     const lines = [];
     let chatTimer;
-    let lastWindow = null;
+    let lastWindow    = null;
     let guiSettleTimer = null;
 
     const onMsg = (msgStr) => {
@@ -477,7 +444,7 @@ function capture(command, waitMs = 6000) {
       mcBot.removeListener("windowOpen", onWindow);
       clearTimeout(chatTimer);
       if (lastWindow) {
-        const items = parseWindowItems(lastWindow);
+        const items = parseWindowItems(lastWindow, false);
         try { mcBot.closeWindow(lastWindow); } catch {}
         finish({ type: "gui", items });
       } else {
@@ -501,46 +468,37 @@ function capture(command, waitMs = 6000) {
       mcBot.removeListener("messagestr", onMsg);
       mcBot.removeListener("windowOpen", onWindow);
       clearTimeout(guiSettleTimer);
-      if (lastWindow && !done) {
-        finaliseGui();
-      } else {
-        finish({ type: "chat", text: lines.join("\n") || "(no output)" });
-      }
+      if (lastWindow && !done) finaliseGui();
+      else finish({ type: "chat", text: lines.join("\n") || "(no output)" });
     }, waitMs);
   });
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ISLAND TOP  (proper NBT parsing, ported from istop.js)
+//  ISLAND TOP  (NBT GUI parsing with lore-filter enabled)
 // ═══════════════════════════════════════════════════════════════
 
 async function fetchIsTop() {
-  // TalonMC uses /is top co_op — try it directly first
-  let items = await captureGui("/is top co_op", 9000);
+  // requireLore=true so filler GUI items are discarded before parsing
+  let items = await captureGui("/is top co_op", 9000, true);
   if (items.length) {
     const parsed = parseIsTopItems(items);
     if (parsed.length) return parsed;
   }
 
-  console.log("[istop] /is top co_op returned no ranked islands, trying /is top with co_op click...");
-
-  // Fall back: open /is top and look for a Co-Op button to click
+  console.log("[istop] /is top co_op no ranked islands, trying click fallback...");
   items = await captureGuiWithClick("/is top", "co_op", 9000);
   if (items.length) {
     const parsed = parseIsTopItems(items);
     if (parsed.length) return parsed;
   }
 
-  console.log("[istop] co_op click fallback also failed, trying plain /is top...");
-  items = await captureGui("/is top", 8000);
+  console.log("[istop] fallback trying plain /is top...");
+  items = await captureGui("/is top", 8000, true);
   if (!items.length) return null;
   return parseIsTopItems(items);
 }
 
-/**
- * Opens a GUI, finds the first slot whose name matches `clickKeyword` (case-insensitive),
- * clicks it, then captures the resulting window.
- */
 function captureGuiWithClick(command, clickKeyword, waitMs = 10000) {
   return new Promise(resolve => {
     if (!mcBot || !mcReady) return resolve([]);
@@ -554,9 +512,9 @@ function captureGuiWithClick(command, clickKeyword, waitMs = 10000) {
     const onSecondWindow = window => {
       clearTimeout(globalTimer);
       mcBot.removeListener("windowOpen", onSecondWindow);
-      // Settle briefly so all slots populate
       setTimeout(() => {
-        const items = parseWindowItems(window);
+        // requireLore=true for the result window too
+        const items = parseWindowItems(window, true);
         try { mcBot.closeWindow(window); } catch {}
         console.log(`[gui] ${command} (click ${clickKeyword}) → ${items.length} items`);
         resolve(items);
@@ -565,7 +523,6 @@ function captureGuiWithClick(command, clickKeyword, waitMs = 10000) {
 
     const onFirstWindow = window => {
       mcBot.removeListener("windowOpen", onFirstWindow);
-      // Small settle so the GUI fills before we search
       setTimeout(() => {
         const limit = window.inventoryStart ?? window.slots.length;
         let clickSlot = -1;
@@ -577,11 +534,9 @@ function captureGuiWithClick(command, clickKeyword, waitMs = 10000) {
         }
 
         if (clickSlot === -1) {
-          // No matching button — just parse this window as-is
           clearTimeout(globalTimer);
-          const items = parseWindowItems(window);
+          const items = parseWindowItems(window, true);
           try { mcBot.closeWindow(window); } catch {}
-          console.log(`[gui] ${command} no click target found, parsed ${items.length} items`);
           resolve(items);
           return;
         }
@@ -601,23 +556,30 @@ function parseIsTopItems(items) {
   const islands = [];
 
   for (const item of items) {
-    // Rank is in the item name: "#1 IslandName" / "1. IslandName" / "#1 - IslandName"
+    // Must have a rank number at the start of the name
     const rankMatch = item.name.match(/^#?(\d+)[\s.\-]+/);
     if (!rankMatch) continue;
 
     const rank   = parseInt(rankMatch[1]);
     const isName = item.name.replace(/^#?\d+[\s.\-]+/, "").trim() || "Unknown";
 
-    // Value from lore
+    // ── Island value ───────────────────────────────────────────
+    // Scan all lore lines for the value. We prefer an explicit
+    // "Island Value:" label but fall back to the first parseable
+    // money amount found anywhere in the lore.
     let value = 0;
     for (const l of item.lore) {
-      const m = l.match(/(?:Island\s+)?Value[:\s]*([\d,.]+\s*[TBMK]?)\$?/i)
-             ?? l.match(/\$([\d,.]+\s*[TBMK]?)/i)
-             ?? l.match(/([\d,.]+\s*[TBMK])\b/i);
-      if (m) { const v = parseMoney(m[1]); if (v > 0) { value = v; break; } }
+      const explicit = l.match(/(?:Island\s+)?Value[:\s]*([\d,.]+\s*[TBMK]?)\$?/i);
+      if (explicit) { const v = parseMoney(explicit[1]); if (v > 0) { value = v; break; } }
+    }
+    if (!value) {
+      for (const l of item.lore) {
+        const m = l.match(/\$([\d,.]+\s*[TBMK]?)/i) ?? l.match(/([\d,.]+\s*[TBMK])\b/i);
+        if (m) { const v = parseMoney(m[1]); if (v > 0) { value = v; break; } }
+      }
     }
 
-    // Members from lore (after "Members:" / "Island Members:" header, or +/- lines)
+    // ── Members ────────────────────────────────────────────────
     const members = [];
     let inMembers = false;
     for (const l of item.lore) {
@@ -630,12 +592,10 @@ function parseIsTopItems(items) {
           inMembers = false;
         }
       }
-      // Explicit "Owner: PlayerName" lines
       const ownerM = l.match(/Owner[:\s]+([A-Za-z0-9_]{3,16})/i);
       if (ownerM && !members.includes(ownerM[1])) members.unshift(ownerM[1]);
     }
 
-    // Player head thumbnail from skull ID
     const thumbnail = item.skullId
       ? `https://crafatar.com/avatars/${item.skullId}?overlay`
       : null;
@@ -648,19 +608,12 @@ function parseIsTopItems(items) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  /invsee GUI PARSER
-//
-//  /invsee opens a chest GUI showing the target player's inventory.
-//  We read it with the same NBT parser used for /is top.
-//
-//  Voucher detection: only matches "<amount>$ (Voucher)" in item name.
-//  Tool perks, pet perks, boosters etc. do NOT match and are ignored.
+//  VOUCHER DETECTION
 // ═══════════════════════════════════════════════════════════════
 
 function parseVouchersFromItems(items) {
   const vouchers = [];
   for (const item of items) {
-    // Exact format: "500B$ (Voucher)" or "1.2T$ (Voucher)"
     const m = item.name.match(/^([\d,.]+\s*[TBMK]?)\$\s*\(Voucher\)/i);
     if (!m) continue;
     const amount = parseMoney(m[1]);
@@ -676,7 +629,7 @@ function isOfflineResponse(text) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PARSE /is info (chat output)
+//  PARSE /is info (chat)
 // ═══════════════════════════════════════════════════════════════
 
 function parseIsInfo(raw) {
@@ -699,26 +652,33 @@ function parseIsInfo(raw) {
 
 // ═══════════════════════════════════════════════════════════════
 //  PARSE /bal
+//  TalonMC format: "<Name>'s Balance: ❙ Crop Coins: X ❙ Money: X"
+//  We split on ❙ and look for the "Money:" segment.
 // ═══════════════════════════════════════════════════════════════
 
 function parseBal(raw) {
-  // TalonMC bal format: "Name's Balance: ❙ Crop Coins: X ❙ Money: X ❙ ..."
-  // Split on ❙ and find the segment that starts with "Money:"
   const segments = raw.split("❙").map(s => s.trim());
   for (const seg of segments) {
     const m = seg.match(/^Money:\s*([\d,.]+\s*[TBMK]?)/i);
     if (m) return parseMoney(m[1]);
   }
-  // Fallback: look for "Money:" anywhere without ❙ splitting
   const fallback = raw.match(/Money:\s*([\d,.]+\s*[TBMK]?)/i);
   if (fallback) return parseMoney(fallback[1]);
   return 0;
 }
+
 // ═══════════════════════════════════════════════════════════════
-//  DISCORD HELPERS
+//  CHANNEL ROUTING HELPERS
+//
+//  Rule summary:
+//    alertChannel   — all automatic monitoring alerts (vouchers,
+//                     balance drops, online/offline, island changes,
+//                     skills top changes, morning report, island top scan)
+//    commandChannel — bot status messages (online/kicked/reconnecting),
+//                     /bal poll results for each tracked player,
+//                     proxy failures, hub rejoins
 // ═══════════════════════════════════════════════════════════════
 
-// Automated alerts → alertChannel (or override channel)
 async function sendEmbed(title, description, color = 0xf5a623, fields = [], ping = false, targetChannel = null) {
   const ch = targetChannel ?? alertChannel;
   if (!ch) return;
@@ -731,12 +691,17 @@ async function sendEmbed(title, description, color = 0xf5a623, fields = [], ping
   return ch.send({ content: ping ? alertPing() : undefined, embeds: [embed] }).catch(console.error);
 }
 
-// Post non-alert info/status to commandChannel
+// Shorthand: send to commandChannel
 async function sendToCommand(title, description, color = 0x5865f2, fields = []) {
   return sendEmbed(title, description, color, fields, false, commandChannel);
 }
 
-// Replies to manual commands in commandChannel
+// Shorthand: send to alertChannel (with optional @alerts ping)
+async function sendAlert(title, description, color = 0xef4444, fields = [], ping = true) {
+  return sendEmbed(title, description, color, fields, ping, alertChannel);
+}
+
+// Reply to a Discord command message
 async function replyEmbed(msg, title, description, color = 0xf5a623, fields = []) {
   const embed = new EmbedBuilder()
     .setTitle(title)
@@ -752,7 +717,6 @@ async function replyFormatted(msg, title, raw, color = 0x2b2d31) {
   return replyEmbed(msg, title, `\`\`\`\n${trimmed}\n\`\`\``, color);
 }
 
-// Renders a GUI result (from ?<command>) as paginated Discord embeds
 async function replyGuiContents(msg, command, items) {
   if (!items.length) {
     return replyEmbed(msg, "🖥️ GUI Empty", `Command \`${command}\` returned no items.`, 0xef4444);
@@ -764,9 +728,7 @@ async function replyGuiContents(msg, command, items) {
     const total  = Math.ceil(items.length / chunkSize);
     const fields = chunk.map(it => ({
       name:   `Slot ${it.slot}: ${it.name}${it.count > 1 ? ` ×${it.count}` : ""}`,
-      value:  it.lore.length
-        ? `\`\`\`${it.lore.join("\n").slice(0, 900)}\`\`\``
-        : "*(no lore)*",
+      value:  it.lore.length ? `\`\`\`${it.lore.join("\n").slice(0, 900)}\`\`\`` : "*(no lore)*",
       inline: false,
     }));
     const embed = new EmbedBuilder()
@@ -780,7 +742,7 @@ async function replyGuiContents(msg, command, items) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MORNING REPORT  (8:00am daily)
+//  MORNING REPORT  (8:00am daily → alertChannel)
 // ═══════════════════════════════════════════════════════════════
 
 function scheduleMorningReport() {
@@ -815,15 +777,17 @@ async function sendMorningReport() {
     ? `\n\n🏆 Biggest overnight depositor: **${biggestDepositor}** (${formatMoney(biggestAmt)})`
     : "";
 
-  await sendEmbed(
+  await sendAlert(
     "🌅 Morning Report",
     `Overnight summary for **${trackedPlayers.size}** tracked players:\n\n${rows.join("\n")}${note}`,
-    0x5865f2
+    0x5865f2,
+    [],
+    false // no ping for morning report
   );
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SKILLS TOP WATCHER  (posts only when top 3 changes)
+//  SKILLS TOP WATCHER  (→ alertChannel, only on change)
 // ═══════════════════════════════════════════════════════════════
 
 const lastSkillsTop = {};
@@ -856,24 +820,22 @@ async function checkSkillsTop() {
     const prev  = lastSkillsTop[cat.key];
     lastSkillsTop[cat.key] = names;
 
-    if (prev === undefined) continue; // first run: set baseline silently
-    if (prev === names)     continue; // no change
+    if (prev === undefined) continue;
+    if (prev === names)     continue;
 
     const trimmed = output.length > 1500 ? output.slice(0, 1500) + "\n…" : output;
-    await sendEmbed(
+    await sendAlert(
       `📊 ${cat.label} — Top 3 Changed!`,
       `\`\`\`\n${trimmed}\n\`\`\``,
       0xf97316,
       [{ name: "⚠️ Change detected", value: `Was: \`${prev || "—"}\`\nNow: \`${names}\`` }],
-      // I removed the false and commandChannel arguments that used to be here
-      // It was forcing your message into the command channel instead of letting it default to the alerts channel
+      false // no ping for skills changes
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  POLL LOOP
-//  Cycle per tracked player: /invsee (GUI) → /bal → /is info (hourly)
 // ═══════════════════════════════════════════════════════════════
 
 async function runPollLoop() {
@@ -889,33 +851,49 @@ async function runPollLoop() {
 
     const players = [...trackedPlayers.keys()];
 
-    // ── Phase 1: /invsee each player (GUI) ──────────────────────
+    // ── Phase 1: /invsee each player (GUI → alertChannel) ────────
+        // ── Phase 1: /invsee each player (GUI → alertChannel) ────────
     for (const player of players) {
       if (!mcReady || !inSkyblock || pollPaused) break;
+
+      let data = trackedPlayers.get(player);
+      if (!data) continue;
+
+      // If we already know they're offline, do a lightweight /bal check
+      // to detect when they come back rather than opening a GUI.
+      if (data.isOnline === false) {
+        await sleep(POLL_BASE_DELAY + jitter());
+        const probe = await captureOnlyChat(`/bal ${player}`, 4000);
+        if (!isOfflineResponse(probe) && parseBal(probe) > 0) {
+          data.isOnline = true;
+          trackedPlayers.set(player, data);
+          await sendAlert("🟢 Player Online", `**${player}** came back online!`, 0x22c55e, [], false);
+        }
+        continue;
+      }
+
       await sleep(POLL_BASE_DELAY + jitter());
 
-      // Use smart capture — /invsee opens a GUI if player is online,
-      // or sends a chat error if they're offline.
       const result = await capture(`/invsee ${player}`, 5000);
-      const data   = trackedPlayers.get(player);
+      data = trackedPlayers.get(player);
       if (!data) continue;
 
       if (result.type === "chat") {
-        // Chat response = error message (player offline / not found)
+        // Chat response = offline/error — route to alertChannel
         const offline = isOfflineResponse(result.text);
         if (offline && data.isOnline === true) {
           data.isOnline = false;
-          await sendEmbed("🔴 Player Offline", `**${player}** has gone offline.`, 0x888780);
+          await sendAlert("🔴 Player Offline", `**${player}** has gone offline.`, 0x888780, [], false);
         } else if (!offline && data.isOnline === false) {
           data.isOnline = true;
-          await sendEmbed("🟢 Player Online", `**${player}** came back online!`, 0x22c55e);
+          await sendAlert("🟢 Player Online", `**${player}** came back online!`, 0x22c55e, [], false);
         } else if (data.isOnline === null) {
           data.isOnline = !offline;
         }
       } else {
-        // GUI opened = player is online. Parse their inventory with NBT.
+        // GUI = online
         if (data.isOnline === false) {
-          await sendEmbed("🟢 Player Online", `**${player}** came back online!`, 0x22c55e);
+          await sendAlert("🟢 Player Online", `**${player}** came back online!`, 0x22c55e, [], false);
         }
         data.isOnline = true;
 
@@ -934,7 +912,7 @@ async function runPollLoop() {
             const list = vouchers.map(v =>
               `• ${formatMoney(v.amount)}${v.count > 1 ? ` ×${v.count} = ${formatMoney(v.amount * v.count)}` : ""} — \`${v.raw}\``
             ).join("\n");
-            await sendEmbed(
+            await sendAlert(
               "💵 VOUCHER DETECTED",
               `**${player}** is holding money vouchers!`,
               0xf97316,
@@ -955,52 +933,75 @@ async function runPollLoop() {
       console.log(`[poll] invsee ${player}: ${data.isOnline ? "online" : "offline"}`);
     }
 
-    // ── Phase 2: /bal each player ────────────────────────────────
+    // ── Phase 2: /bal each player (→ commandChannel) ─────────────
+    //
+    // Balance results are informational/noisy so they go to
+    // commandChannel. Only DROPS trigger alerts in alertChannel.
+    // Skip players known to be offline — resume when they come back.
     for (const player of players) {
       if (!mcReady || !inSkyblock || pollPaused) break;
+
+      const data = trackedPlayers.get(player);
+      if (!data) continue;
+
+      // Skip bal check for players we know are offline
+      if (data.isOnline === false) continue;
+
       await sleep(POLL_BASE_DELAY + jitter());
 
       const output  = await captureOnlyChat(`/bal ${player}`, 4000);
-      const data    = trackedPlayers.get(player);
-      if (!data) continue;
 
       const current  = parseBal(output);
       const previous = data.lastBal ?? 0;
       if (current > 0) data.lastBal = current;
       trackedPlayers.set(player, data);
 
+      // Forward the raw /bal result to commandChannel so you can see it
+      if (current > 0) {
+        const increased = previous > 0 && current > previous;
+        const changeStr = previous > 0
+          ? `\nPrevious: \`${formatMoney(previous)}\`` + (increased ? `  🟢 +${formatMoney(current - previous)}` : "")
+          : "";
+        sendToCommand(
+          `💰 /bal ${player}`,
+          `Current balance: **${formatMoney(current)}**${changeStr}`,
+          increased ? 0x22c55e : 0x2b2d31
+        );
+      }
+
+      // Balance drop alert → alertChannel with @alerts ping
       if (current > 0 && previous > 0 && previous > current) {
         const dropped = previous - current;
         const pct     = dropped / previous;
-        // Only alert if drop is 10% or more of previous balance
+        // Only alert if drop is ≥10% of previous balance (avoids noise from tiny fluctuations)
         if (pct >= 0.10) {
           const key = `bal_${player}`;
-          // 60s cooldown to prevent double-firing on same event, but no 5min block
           if (Date.now() - (alertCooldowns.get(key) || 0) > 60000) {
-          alertCooldowns.set(key, Date.now());
-          stats.alertsSent++;
-          data.depositHistory = data.depositHistory ?? [];
-          data.depositHistory.push({ ts: Date.now(), amount: dropped });
-          if (data.depositHistory.length > 500) data.depositHistory.shift();
-          trackedPlayers.set(player, data);
-          saveData();
-          await sendEmbed(
-            "🚨 BALANCE DROP",
-            `**${player}** just deposited or spent money!`,
-            0xef4444,
-            [
-              { name: "Before",  value: formatMoney(previous),         inline: true },
-              { name: "After",   value: formatMoney(current),          inline: true },
-              { name: "Dropped", value: `**${formatMoney(dropped)}**`, inline: true },
-            ],
-            true // ping @alerts
-          );
+            alertCooldowns.set(key, Date.now());
+            stats.alertsSent++;
+            data.depositHistory = data.depositHistory ?? [];
+            data.depositHistory.push({ ts: Date.now(), amount: dropped });
+            if (data.depositHistory.length > 500) data.depositHistory.shift();
+            trackedPlayers.set(player, data);
+            saveData();
+            await sendAlert(
+              "🚨 BALANCE DROP",
+              `**${player}** just deposited or spent money!`,
+              0xef4444,
+              [
+                { name: "Before",  value: formatMoney(previous),         inline: true },
+                { name: "After",   value: formatMoney(current),          inline: true },
+                { name: "Dropped", value: `**${formatMoney(dropped)}**`, inline: true },
+              ],
+              true // ping @alerts
+            );
+          }
         }
       }
       console.log(`[poll] bal ${player}: ${formatMoney(current)}`);
-    }}
+    }
 
-    // ── Phase 3: /is info each player (once per hour) ────────────
+    // ── Phase 3: /is info each player (hourly → alertChannel) ────
     const isInfoKey  = "isinfo_cycle";
     const lastIsInfo = alertCooldowns.get(isInfoKey) || 0;
     if (Date.now() - lastIsInfo > 60 * 60 * 1000) {
@@ -1030,7 +1031,7 @@ async function runPollLoop() {
           if (Date.now() - lastAlert > 3600000) {
             alertCooldowns.set(key, Date.now());
             stats.alertsSent++;
-            await sendEmbed(
+            await sendAlert(
               "🏝️ ISLAND VALUE INCREASE",
               `**${player}**'s island gained value!`,
               0x3b82f6,
@@ -1051,7 +1052,10 @@ async function runPollLoop() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ISLAND TOP SCAN  (hourly, auto-tracks #1 owner)
+//  ISLAND TOP SCAN  (hourly → alertChannel)
+//
+//  Also detects when the #1 island name changes (by island name,
+//  not by member list) and fires an alert.
 // ═══════════════════════════════════════════════════════════════
 
 async function scanIslandTop() {
@@ -1064,13 +1068,35 @@ async function scanIslandTop() {
     return;
   }
 
-  // Auto-add new players to tracking
+  // ── #1 island change detection (by name) ─────────────────────
+  const newTopName = islands[0]?.name ?? null;
+  if (newTopName && topIslandName !== null && topIslandName !== newTopName) {
+    // The #1 island has changed — fire an alert
+    const newIsland = islands[0];
+    stats.alertsSent++;
+    await sendAlert(
+      "👑 NEW #1 ISLAND",
+      `The top island has changed!`,
+      0xf5c400,
+      [
+        { name: "Was",     value: `\`${topIslandName}\``,                              inline: true },
+        { name: "Now",     value: `\`${newTopName}\``,                                 inline: true },
+        { name: "Value",   value: newIsland.value ? formatMoney(newIsland.value) : "—", inline: true },
+        { name: "Members", value: newIsland.members.join(", ") || "—",                 inline: false },
+      ],
+      true // ping @alerts
+    );
+  }
+  // Update stored name (even on first run, so next scan has a baseline)
+  topIslandName = newTopName;
+
+  // ── Auto-add new players ──────────────────────────────────────
   const added = [];
   for (const island of islands) {
     for (const member of island.members) {
       if (!trackedPlayers.has(member)) {
         trackedPlayers.set(member, {
-          lastBal: 0, lastIslandValue: 0, lastInvsee: null,
+          lastBal: 0, lastIslandValue: island.value ?? 0, lastInvsee: null,
           addedAt:  Date.now(),
           source:   island.rank === 1 ? "forced-#1" : "autoscan",
           isOnline: null, depositHistory: [], islandMembers: [],
@@ -1080,12 +1106,12 @@ async function scanIslandTop() {
     }
   }
 
-  // Force-track island #1 owner even if somehow missed above
+  // Force-track #1 owner
   if (islands[0]?.rank === 1 && islands[0].members.length) {
     const owner = islands[0].members[0];
     if (!trackedPlayers.has(owner)) {
       trackedPlayers.set(owner, {
-        lastBal: 0, lastIslandValue: 0, lastInvsee: null,
+        lastBal: 0, lastIslandValue: islands[0].value ?? 0, lastInvsee: null,
         addedAt: Date.now(), source: "forced-#1",
         isOnline: null, depositHistory: [], islandMembers: [],
       });
@@ -1096,11 +1122,10 @@ async function scanIslandTop() {
   if (added.length) {
     saveData();
     const rows = added.map(f => `\`${f.name}\` (island #${f.rank})`).join(", ");
-    // Removed commandChannel from here too
-    await sendEmbed("🗺️ Auto-Track Update", `Added **${added.length}** new players:\n${rows}`, 0x3b82f6);
+    await sendAlert("🗺️ Auto-Track Update", `Added **${added.length}** new players:\n${rows}`, 0x3b82f6, [], false);
   }
 
-  // Post leaderboard with the same rich per-island embed style as istop.js
+  // ── Post leaderboard embeds → alertChannel ────────────────────
   for (const isl of islands.slice(0, 5)) {
     const embed = new EmbedBuilder()
       .setTitle(`#${isl.rank} — ${isl.name}`)
@@ -1123,7 +1148,7 @@ async function scanIslandTop() {
         inline: false,
       });
     }
-    // Changed commandChannel to alertchannel
+
     await alertChannel?.send({ embeds: [embed] }).catch(console.error);
   }
 }
@@ -1145,12 +1170,11 @@ async function createMcBot() {
   console.log("[mc] Connecting...");
 
   if (mcBot) {
-    try { mcBot.removeAllListeners(); } catch (e) {}
-    try { mcBot.quit(); } catch (e) {}
+    try { mcBot.removeAllListeners(); } catch {}
+    try { mcBot.quit(); } catch {}
     mcBot = null;
   }
   clearAllTimers();
-
   inSkyblock = false;
   mcReady    = false;
 
@@ -1159,7 +1183,7 @@ async function createMcBot() {
     port:     MC_PORT,
     username: process.env.MC_EMAIL,
     auth:     "microsoft",
-    version:  "1.21.1",
+   // version:  false,
   };
 
   if (PROXY_HOST && PROXY_PORT) {
@@ -1169,19 +1193,38 @@ async function createMcBot() {
       console.log("[proxy] Tunnel established.");
     } catch (err) {
       console.error("[proxy] Failed:", err.message);
-      sendEmbed("⚠️ Proxy Failed", `${err.message}\nFalling back to direct connection.`, 0xf5a623, [], false, commandChannel);
+      // Proxy failures → commandChannel (operational, not an alert)
+      sendToCommand("⚠️ Proxy Failed", `${err.message}\nFalling back to direct connection.`, 0xf5a623);
     }
   }
 
   mcBot = mineflayer.createBot(botOptions);
+  // Fix for TalonMC's broken skin JSON
+mcBot._client.on('player_info', (packet) => {
+  if (packet.actions?.includes('add_player')) {
+    for (const player of packet.players || []) {
+      if (player.properties) {
+        for (const prop of player.properties) {
+          if (prop.name === 'textures' && prop.value) {
+            // Validate JSON – if invalid, replace with dummy
+            try {
+              JSON.parse(prop.value);
+            } catch (e) {
+              prop.value = JSON.stringify({ textures: { SKIN: { url: '' } } });
+            }
+          }
+        }
+      }
+    }
+  }
+});
 
   mcBot.once("spawn", () => {
-    // Initialise prismarine-chat with the server's negotiated version
     try {
       ChatMessage = require("prismarine-chat")(mcBot.version);
       console.log(`[mc] prismarine-chat loaded for version ${mcBot.version}`);
     } catch (err) {
-      console.warn("[mc] prismarine-chat unavailable, NBT text will use strip() fallback:", err.message);
+      console.warn("[mc] prismarine-chat unavailable:", err.message);
     }
 
     console.log("[mc] Spawned. Joining Skyblock...");
@@ -1192,13 +1235,12 @@ async function createMcBot() {
         mcReady    = true;
         console.log("[mc] In Skyblock. Ready!");
 
-        sendEmbed(
+        // Bot-online status → commandChannel
+        sendToCommand(
           "✅ Bot Online",
           `Connected to **${MC_HOST}** and joined Skyblock.\nTracking **${trackedPlayers.size}** players.`,
           0x22c55e,
-          PROXY_HOST ? [{ name: "Proxy", value: `${PROXY_HOST}:${PROXY_PORT}`, inline: true }] : [],
-          false,
-          commandChannel
+          PROXY_HOST ? [{ name: "Proxy", value: `${PROXY_HOST}:${PROXY_PORT}`, inline: true }] : []
         );
 
         clearTimeout(islandScanTimeout);
@@ -1208,15 +1250,17 @@ async function createMcBot() {
         clearInterval(antiAfkInterval1);
         clearInterval(antiAfkInterval2);
 
-        // Anti-AFK
-        antiAfkInterval1 = setInterval(() => { if (mcReady && inSkyblock && mcBot) mcBot.swingArm(); }, 55000);
+        antiAfkInterval1 = setInterval(() => { 
+          if (mcReady && inSkyblock && mcBot && mcBot.player?.entity) {
+            mcBot.swingArm(); 
+          }
+        }, 55000);  
         antiAfkInterval2 = setInterval(() => {
           if (!mcReady || !inSkyblock || !mcBot) return;
           mcBot.setControlState("jump", true);
           setTimeout(() => mcBot?.setControlState("jump", false), 400);
         }, 180000 + Math.random() * 120000);
 
-        // Scheduled tasks
         islandScanTimeout = setTimeout(() => {
           scanIslandTop();
           islandScanInterval = setInterval(scanIslandTop, 60 * 60 * 1000);
@@ -1232,18 +1276,18 @@ async function createMcBot() {
     }, 4000);
   });
 
-  // MC → Discord chat bridge (goes to logChannel)
+  // MC → Discord chat bridge → logChannel
   mcBot.on("messagestr", (msgStr) => {
     const text = strip(msgStr);
     if (!text || !logChannel) return;
     logChannel.send(`💬 \`${text}\``).catch(() => {});
 
-    // Hub detection → auto-rejoin Skyblock
     const hubSignals = ["welcome to the hub","returned to hub","server restarting","kicked to hub","sent to hub"];
     if (hubSignals.some(s => text.toLowerCase().includes(s)) && inSkyblock) {
       inSkyblock = false;
       mcReady    = false;
-      sendEmbed("🔄 Sent to Hub", "Rejoining Skyblock in 12s...", 0xf5a623, [], false, commandChannel);
+      // Hub rejoin is operational → commandChannel
+      sendToCommand("🔄 Sent to Hub", "Rejoining Skyblock in 12s...", 0xf5a623);
       setTimeout(() => {
         if (!mcBot) return;
         mcBot.chat("/joinqueue skyblock");
@@ -1257,7 +1301,8 @@ async function createMcBot() {
     const clean = strip(typeof reason === "string" ? reason : JSON.stringify(reason));
     console.warn("[mc] Kicked:", clean);
     const delay = ["hub","restart","maintenance","lobby"].some(s => clean.toLowerCase().includes(s)) ? 15000 : 30000;
-    sendEmbed("⚠️ Bot Kicked", `${clean}\n\nReconnecting in ${delay / 1000}s...`, 0xef4444, [], false, commandChannel);
+    // Kick is operational → commandChannel
+    sendToCommand("⚠️ Bot Kicked", `${clean}\n\nReconnecting in ${delay / 1000}s...`, 0xef4444);
     scheduleReconnect(delay);
     stats.reconnects++;
   });
@@ -1293,6 +1338,56 @@ discord.on("messageCreate", async msg => {
   if (msg.content.startsWith("?")) {
     if (!mcReady) return replyEmbed(msg, "❌ Not Connected", "Bot is offline.", 0xef4444);
     if (hasCooldown(msg.author.id, 2000)) return msg.reply("⏱️ Slow down!");
+
+    // ── Special: ?is top co_op [N] ──────────────────────────────
+    // Runs /is top co_op immediately then every N minutes.
+    // The [N] part is stripped before sending to MC.
+    const isTopMatch = msg.content.match(/^\?is\s+top\s+co_op\s*(?:\[(\d+)\])?$/i);
+    if (isTopMatch) {
+      const intervalMins = isTopMatch[1] ? parseInt(isTopMatch[1]) : null;
+
+      // Clear any previously scheduled auto-istop
+      if (isTopAutoInterval) {
+        clearInterval(isTopAutoInterval);
+        isTopAutoInterval = null;
+      }
+
+      const runIsTop = async (replyTarget) => {
+        const islands = await fetchIsTop();
+        if (!islands?.length) {
+          if (replyTarget) replyTarget.channel.send({ embeds: [new EmbedBuilder().setTitle("❌ Island Top Failed").setDescription("Could not read the GUI.").setColor(0xef4444)] }).catch(() => {});
+          return;
+        }
+        for (const isl of islands.slice(0, 5)) {
+          const embed = new EmbedBuilder()
+            .setTitle(`#${isl.rank} — ${isl.name}`)
+            .setDescription(`**Rank:** \`#${isl.rank}\``)
+            .setColor(0x343a40)
+            .setTimestamp();
+          if (isl.thumbnail) embed.setThumbnail(isl.thumbnail);
+          embed.addFields({ name: " ", value: "```ini\n" + `VALUE    = ${isl.value ? formatMoney(isl.value) : "N/A"}` + "\n```", inline: false });
+          if (isl.members.length) embed.addFields({ name: " ", value: "```diff\n" + isl.members.map(m => `+ ${m}`).join("\n") + "\n```", inline: false });
+          await commandChannel?.send({ embeds: [embed] }).catch(() => {});
+        }
+      };
+
+      await msg.react("⏳").catch(() => {});
+      await runIsTop(msg);
+      stats.commandsRun++;
+      msg.reactions.cache.get("⏳")?.users.remove(discord.user.id).catch(() => {});
+
+      if (intervalMins) {
+        const ms = intervalMins * 60 * 1000;
+        isTopAutoInterval = setInterval(() => {
+          if (!mcReady || !inSkyblock) return;
+          runIsTop(null);
+        }, ms);
+        await replyEmbed(msg, "✅ Island Top Scheduled", `Running \`/is top co_op\` now and every **${intervalMins} minute${intervalMins !== 1 ? "s" : ""}**.\nResults → <#${COMMAND_CHANNEL_ID}>\nUse \`?is top co_op\` (no brackets) to run once and cancel the schedule.`, 0x22c55e);
+      }
+      return;
+    }
+
+    // ── Generic ? passthrough ───────────────────────────────────
     const mcCmd = "/" + msg.content.slice(1).trim();
     await msg.react("⏳").catch(() => {});
     const result = await capture(mcCmd, 5000);
@@ -1307,7 +1402,6 @@ discord.on("messageCreate", async msg => {
   const [rawCmd, ...args] = msg.content.slice(1).trim().split(/\s+/);
   const cmd = rawCmd.toLowerCase();
 
-  // ── !help ─────────────────────────────────────────────────────
   if (cmd === "help") {
     return replyEmbed(msg, "📖 MFlayerBot — Commands", "\u200b", 0x5865f2, [
       {
@@ -1315,12 +1409,13 @@ discord.on("messageCreate", async msg => {
         value: [
           "`!moneytop` — Money leaderboard",
           "`!baltop` — Balance top",
-          "`!istop` — Island top (reads GUI via NBT)",
+          "`!istop` — Island top (GUI, NBT parsed)",
           "`!staff` — Online staff",
           "`!online` — Online players",
           "`!tps` — Server TPS",
-          "`!skillstop [farming/mining/fishing]` — Skills leaderboard",
-          "`?<command>` — Run any MC command. GUIs are auto-detected and displayed.",
+          "`!skillstop [farming/mining/fishing]` — Skills leaderboard (GUI-aware)",
+          "`?<command>` — Run any MC command. GUIs auto-detected.",
+          "`?is top co_op [N]` — Run `/is top co_op` now & repeat every N minutes → **#commands**. Omit `[N]` to cancel schedule.",
         ].join("\n"),
       },
       {
@@ -1345,20 +1440,16 @@ discord.on("messageCreate", async msg => {
         ].join("\n"),
       },
       {
-        name: "🔔 Auto Alerts (alerts channel)",
+        name: "🔔 Channel Routing",
         value: [
-          "💵 Voucher in `/invsee` GUI → pings @alerts",
-          "🚨 Balance drop → pings @alerts",
-          "🏝️ Island value increase → pings @alerts",
-          "🟢/🔴 Player online/offline",
-          "📊 Skills top 3 changes → posted automatically",
-          "🌅 Morning report at 8:00am",
+          "**Alerts channel:** Vouchers • Balance drops • Online/offline • #1 island change • Island value increase • Skills top change • Morning report • Hourly island scan",
+          "**Command channel:** Bot status • `/bal` poll results (🟢 on increase) • Kicks • Hub rejoins • Proxy failures • `?is top co_op` schedule results",
+          "**Offline players:** `/invsee` + `/bal` polling paused; resumes automatically when player comes back online.",
         ].join("\n"),
       },
     ]);
   }
 
-  // ── !status ───────────────────────────────────────────────────
   if (cmd === "status") {
     return replyEmbed(msg, "📊 Bot Status", "\u200b", mcReady ? 0x22c55e : 0xef4444, [
       { name: "Minecraft",    value: mcReady    ? "🟢 Connected"     : "🔴 Offline",     inline: true },
@@ -1370,20 +1461,18 @@ discord.on("messageCreate", async msg => {
       { name: "Alerts sent",  value: `${stats.alertsSent}`,                              inline: true },
       { name: "Commands run", value: `${stats.commandsRun}`,                             inline: true },
       { name: "Reconnects",   value: `${stats.reconnects}`,                              inline: true },
+      { name: "Top Island",   value: topIslandName ? `\`${topIslandName}\`` : "Unknown", inline: true },
     ]);
   }
 
-  if (cmd === "pause")     { pollPaused = true;  return replyEmbed(msg, "⏸️ Paused",  "Use `!resume` to restart.", 0xf5a623); }
-  if (cmd === "resume")    { pollPaused = false; return replyEmbed(msg, "▶️ Resumed", "Back to monitoring.",       0x22c55e); }
+  if (cmd === "pause")  { pollPaused = true;  return replyEmbed(msg, "⏸️ Paused",  "Use `!resume` to restart.", 0xf5a623); }
+  if (cmd === "resume") { pollPaused = false; return replyEmbed(msg, "▶️ Resumed", "Back to monitoring.",       0x22c55e); }
 
   if (cmd === "reconnect") {
     await replyEmbed(msg, "🔄 Reconnecting", "Forcing Minecraft reconnect...", 0xf5a623);
-    mcReady = false;
-    inSkyblock = false;
-
+    mcReady = false; inSkyblock = false;
     if (mcBot) mcBot.quit();
     else scheduleReconnect(2000);
-
     return;
   }
 
@@ -1484,7 +1573,6 @@ discord.on("messageCreate", async msg => {
     msg.reactions.cache.get("⏳")?.users.remove(discord.user.id).catch(() => {});
     if (!islands?.length) return replyEmbed(msg, "❌ Island Top Failed", "Could not read the GUI.", 0xef4444);
 
-    // Rich per-island embed (same style as istop.js) — show top 3, or all if any arg given
     const showCount = args.length ? islands.length : 5;
     for (const isl of islands.slice(0, showCount)) {
       const embed = new EmbedBuilder()
@@ -1518,10 +1606,12 @@ discord.on("messageCreate", async msg => {
     const mcCmd = cat ? `/skillstop ${cat}` : "/skillstop";
     const label = cat ? `${cat.charAt(0).toUpperCase() + cat.slice(1)} Skills Top` : "Overall Skills Top";
     await msg.react("⏳").catch(() => {});
-    const result = await captureOnlyChat(mcCmd, 4000);
+    // Use smart capture — /skillstop may open a GUI ("Leaderboard (Page 1)")
+    const result = await capture(mcCmd, 6000);
     stats.commandsRun++;
     msg.reactions.cache.get("⏳")?.users.remove(discord.user.id).catch(() => {});
-    return replyFormatted(msg, `📊 ${label}`, result, 0x5865f2);
+    if (result.type === "gui") return replyGuiContents(msg, mcCmd, result.items);
+    return replyFormatted(msg, `📊 ${label}`, result.text, 0x5865f2);
   }
 
   if (cmd === "compare") {
