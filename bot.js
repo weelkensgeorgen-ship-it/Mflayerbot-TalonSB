@@ -221,11 +221,27 @@ function createProxySocket(targetHost, targetPort) {
 
 
 function extractTextFromJson(obj) {
-  if (!obj) return "";
-  if (typeof obj === "string") return obj;
-  let t = obj.text || "";
-  if (Array.isArray(obj.extra)) t += obj.extra.map(extractTextFromJson).join("");
-  if (Array.isArray(obj.with))  t += obj.with.map(extractTextFromJson).join("");
+  if (obj === null || obj === undefined) return "";
+  if (typeof obj === "string" || typeof obj === "number") return String(obj);
+
+  if (obj.type !== undefined && obj.value !== undefined) {
+    return extractTextFromJson(obj.value);
+  }
+
+  let t = "";
+
+  if (Array.isArray(obj)) {
+    return obj.map(extractTextFromJson).join("");
+  }
+
+  if (obj.text !== undefined) t += extractTextFromJson(obj.text);
+
+  if (obj[""] !== undefined) t += extractTextFromJson(obj[""]);
+
+  if (obj.extra !== undefined) t += extractTextFromJson(obj.extra);
+
+  if (obj.with !== undefined) t += extractTextFromJson(obj.with);
+
   return t;
 }
 
