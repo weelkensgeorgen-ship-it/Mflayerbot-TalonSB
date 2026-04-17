@@ -215,32 +215,36 @@ function createProxySocket(targetHost, targetPort) {
  * Falls back through customName → displayName → item.name.
  */
 function nbtItemName(item) {
-  try {
-    if (item.nbt) {
-      const simplified = nbt.simplify(item.nbt);
-      const rawName    = simplified?.display?.Name;
-      if (rawName) {
-        if (ChatMessage) {
-          try {
-            const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
-            return strip(new ChatMessage(parsed).toString());
-          } catch {}
-        }
-        return strip(typeof rawName === "string" ? rawName : JSON.stringify(rawName));
-      }
-    }
-  } catch {}
+ try {
+   if (item.customName) {
+     const parsed = typeof item.customName === "string" ? JSON.parse(item.customName) : item.customName;
+     if (ChatMessage) {
+       return strip(new ChatMessage(parsed).toString());
+     }
+     const text = parsed.text || "";
+     const extra = parsed.extra?.map(e => e.text || "").join("") || "";
+     return strip(text + extra);
+   }
+ } catch {}
 
-  try {
-    if (item.customName) {
-      const parsed = JSON.parse(item.customName);
-      const text   = parsed.text ?? parsed.extra?.map(e => e.text ?? "").join("") ?? "";
-      return strip(text);
-    }
-  } catch {}
+ try {
+   if (item.nbt) {
+     const simplified = nbt.simplify(item.nbt);
+     const rawName    = simplified?.display?.Name;
+     if (rawName) {
+       if (ChatMessage) {
+         try {
+           const parsed = typeof rawName === "string" ? JSON.parse(rawName) : rawName;
+           return strip(new ChatMessage(parsed).toString());
+         } catch {}
+       }
+       return strip(typeof rawName === "string" ? rawName : JSON.stringify(rawName));
+     }
+   }
+ } catch {}
 
-  return strip(item.displayName ?? item.name ?? "");
-}
+   return strip(item.displayName ?? item.name ?? "");
+ }
 
 /**
  * Get lore lines from a mineflayer item using NBT.
@@ -1157,6 +1161,13 @@ async function createMcBot() {
           commandChannel
         );
 
+        clearTimeout(islandScanTimeout);
+        clearInterval(islandScanInterval);
+        clearTimeout(skillsTopTimeout);
+        clearInterval(skillsTopInterval);
+        clearInterval(antiAfkInterval1);
+        clearInterval(antiAfkInterval2);
+
         // Anti-AFK
         antiAfkInterval1 = setInterval(() => { if (mcReady && inSkyblock && mcBot) mcBot.swingArm(); }, 55000);
         antiAfkInterval2 = setInterval(() => {
@@ -1430,7 +1441,7 @@ discord.on("messageCreate", async msg => {
     if (!islands?.length) return replyEmbed(msg, "❌ Island Top Failed", "Could not read the GUI.", 0xef4444);
 
     // Rich per-island embed (same style as istop.js) — show top 3, or all if any arg given
-    const showCount = args.length ? islands.length : 3;
+    const showCount = args.length ? islands.length : 5;
     for (const isl of islands.slice(0, showCount)) {
       const embed = new EmbedBuilder()
         .setTitle(`#${isl.rank} — ${isl.name}`)
