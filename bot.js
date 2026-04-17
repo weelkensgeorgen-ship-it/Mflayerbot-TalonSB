@@ -58,7 +58,6 @@ let skillsTopTimeout   = null;
 let skillsTopInterval  = null;
 let antiAfkInterval1   = null;
 let antiAfkInterval2   = null;
-let isTopAutoInterval  = null;   // for ?is top co_op [N]
 
 let ChatMessage = null;
 
@@ -83,8 +82,6 @@ function clearAllTimers() {
   clearInterval(skillsTopInterval);
   clearInterval(antiAfkInterval1);
   clearInterval(antiAfkInterval2);
-  clearInterval(isTopAutoInterval);
-  isTopAutoInterval = null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -852,30 +849,12 @@ async function runPollLoop() {
     const players = [...trackedPlayers.keys()];
 
     // ── Phase 1: /invsee each player (GUI → alertChannel) ────────
-        // ── Phase 1: /invsee each player (GUI → alertChannel) ────────
     for (const player of players) {
       if (!mcReady || !inSkyblock || pollPaused) break;
-
-      let data = trackedPlayers.get(player);
-      if (!data) continue;
-
-      // If we already know they're offline, do a lightweight /bal check
-      // to detect when they come back rather than opening a GUI.
-      if (data.isOnline === false) {
-        await sleep(POLL_BASE_DELAY + jitter());
-        const probe = await captureOnlyChat(`/bal ${player}`, 4000);
-        if (!isOfflineResponse(probe) && parseBal(probe) > 0) {
-          data.isOnline = true;
-          trackedPlayers.set(player, data);
-          await sendAlert("🟢 Player Online", `**${player}** came back online!`, 0x22c55e, [], false);
-        }
-        continue;
-      }
-
       await sleep(POLL_BASE_DELAY + jitter());
 
       const result = await capture(`/invsee ${player}`, 5000);
-      data = trackedPlayers.get(player);
+      const data   = trackedPlayers.get(player);
       if (!data) continue;
 
       if (result.type === "chat") {
@@ -937,19 +916,13 @@ async function runPollLoop() {
     //
     // Balance results are informational/noisy so they go to
     // commandChannel. Only DROPS trigger alerts in alertChannel.
-    // Skip players known to be offline — resume when they come back.
     for (const player of players) {
       if (!mcReady || !inSkyblock || pollPaused) break;
-
-      const data = trackedPlayers.get(player);
-      if (!data) continue;
-
-      // Skip bal check for players we know are offline
-      if (data.isOnline === false) continue;
-
       await sleep(POLL_BASE_DELAY + jitter());
 
       const output  = await captureOnlyChat(`/bal ${player}`, 4000);
+      const data    = trackedPlayers.get(player);
+      if (!data) continue;
 
       const current  = parseBal(output);
       const previous = data.lastBal ?? 0;
@@ -958,14 +931,10 @@ async function runPollLoop() {
 
       // Forward the raw /bal result to commandChannel so you can see it
       if (current > 0) {
-        const increased = previous > 0 && current > previous;
-        const changeStr = previous > 0
-          ? `\nPrevious: \`${formatMoney(previous)}\`` + (increased ? `  🟢 +${formatMoney(current - previous)}` : "")
-          : "";
         sendToCommand(
           `💰 /bal ${player}`,
-          `Current balance: **${formatMoney(current)}**${changeStr}`,
-          increased ? 0x22c55e : 0x2b2d31
+          `Current balance: **${formatMoney(current)}**${previous > 0 ? `\nPrevious: \`${formatMoney(previous)}\`` : ""}`,
+          0x2b2d31
         );
       }
 
@@ -1183,7 +1152,7 @@ async function createMcBot() {
     port:     MC_PORT,
     username: process.env.MC_EMAIL,
     auth:     "microsoft",
-   // version:  false,
+    version:  "1.21.1",
   };
 
   if (PROXY_HOST && PROXY_PORT) {
@@ -1199,25 +1168,6 @@ async function createMcBot() {
   }
 
   mcBot = mineflayer.createBot(botOptions);
-  // Fix for TalonMC's broken skin JSON
-mcBot._client.on('player_info', (packet) => {
-  if (packet.actions?.includes('add_player')) {
-    for (const player of packet.players || []) {
-      if (player.properties) {
-        for (const prop of player.properties) {
-          if (prop.name === 'textures' && prop.value) {
-            // Validate JSON – if invalid, replace with dummy
-            try {
-              JSON.parse(prop.value);
-            } catch (e) {
-              prop.value = JSON.stringify({ textures: { SKIN: { url: '' } } });
-            }
-          }
-        }
-      }
-    }
-  }
-});
 
   mcBot.once("spawn", () => {
     try {
@@ -1250,11 +1200,7 @@ mcBot._client.on('player_info', (packet) => {
         clearInterval(antiAfkInterval1);
         clearInterval(antiAfkInterval2);
 
-        antiAfkInterval1 = setInterval(() => { 
-          if (mcReady && inSkyblock && mcBot && mcBot.player?.entity) {
-            mcBot.swingArm(); 
-          }
-        }, 55000);  
+        antiAfkInterval1 = setInterval(() => { if (mcReady && inSkyblock && mcBot) mcBot.swingArm(); }, 55000);
         antiAfkInterval2 = setInterval(() => {
           if (!mcReady || !inSkyblock || !mcBot) return;
           mcBot.setControlState("jump", true);
@@ -1338,56 +1284,6 @@ discord.on("messageCreate", async msg => {
   if (msg.content.startsWith("?")) {
     if (!mcReady) return replyEmbed(msg, "❌ Not Connected", "Bot is offline.", 0xef4444);
     if (hasCooldown(msg.author.id, 2000)) return msg.reply("⏱️ Slow down!");
-
-    // ── Special: ?is top co_op [N] ──────────────────────────────
-    // Runs /is top co_op immediately then every N minutes.
-    // The [N] part is stripped before sending to MC.
-    const isTopMatch = msg.content.match(/^\?is\s+top\s+co_op\s*(?:\[(\d+)\])?$/i);
-    if (isTopMatch) {
-      const intervalMins = isTopMatch[1] ? parseInt(isTopMatch[1]) : null;
-
-      // Clear any previously scheduled auto-istop
-      if (isTopAutoInterval) {
-        clearInterval(isTopAutoInterval);
-        isTopAutoInterval = null;
-      }
-
-      const runIsTop = async (replyTarget) => {
-        const islands = await fetchIsTop();
-        if (!islands?.length) {
-          if (replyTarget) replyTarget.channel.send({ embeds: [new EmbedBuilder().setTitle("❌ Island Top Failed").setDescription("Could not read the GUI.").setColor(0xef4444)] }).catch(() => {});
-          return;
-        }
-        for (const isl of islands.slice(0, 5)) {
-          const embed = new EmbedBuilder()
-            .setTitle(`#${isl.rank} — ${isl.name}`)
-            .setDescription(`**Rank:** \`#${isl.rank}\``)
-            .setColor(0x343a40)
-            .setTimestamp();
-          if (isl.thumbnail) embed.setThumbnail(isl.thumbnail);
-          embed.addFields({ name: " ", value: "```ini\n" + `VALUE    = ${isl.value ? formatMoney(isl.value) : "N/A"}` + "\n```", inline: false });
-          if (isl.members.length) embed.addFields({ name: " ", value: "```diff\n" + isl.members.map(m => `+ ${m}`).join("\n") + "\n```", inline: false });
-          await commandChannel?.send({ embeds: [embed] }).catch(() => {});
-        }
-      };
-
-      await msg.react("⏳").catch(() => {});
-      await runIsTop(msg);
-      stats.commandsRun++;
-      msg.reactions.cache.get("⏳")?.users.remove(discord.user.id).catch(() => {});
-
-      if (intervalMins) {
-        const ms = intervalMins * 60 * 1000;
-        isTopAutoInterval = setInterval(() => {
-          if (!mcReady || !inSkyblock) return;
-          runIsTop(null);
-        }, ms);
-        await replyEmbed(msg, "✅ Island Top Scheduled", `Running \`/is top co_op\` now and every **${intervalMins} minute${intervalMins !== 1 ? "s" : ""}**.\nResults → <#${COMMAND_CHANNEL_ID}>\nUse \`?is top co_op\` (no brackets) to run once and cancel the schedule.`, 0x22c55e);
-      }
-      return;
-    }
-
-    // ── Generic ? passthrough ───────────────────────────────────
     const mcCmd = "/" + msg.content.slice(1).trim();
     await msg.react("⏳").catch(() => {});
     const result = await capture(mcCmd, 5000);
@@ -1413,9 +1309,8 @@ discord.on("messageCreate", async msg => {
           "`!staff` — Online staff",
           "`!online` — Online players",
           "`!tps` — Server TPS",
-          "`!skillstop [farming/mining/fishing]` — Skills leaderboard (GUI-aware)",
+          "`!skillstop [farming/mining/fishing]` — Skills leaderboard",
           "`?<command>` — Run any MC command. GUIs auto-detected.",
-          "`?is top co_op [N]` — Run `/is top co_op` now & repeat every N minutes → **#commands**. Omit `[N]` to cancel schedule.",
         ].join("\n"),
       },
       {
@@ -1443,8 +1338,7 @@ discord.on("messageCreate", async msg => {
         name: "🔔 Channel Routing",
         value: [
           "**Alerts channel:** Vouchers • Balance drops • Online/offline • #1 island change • Island value increase • Skills top change • Morning report • Hourly island scan",
-          "**Command channel:** Bot status • `/bal` poll results (🟢 on increase) • Kicks • Hub rejoins • Proxy failures • `?is top co_op` schedule results",
-          "**Offline players:** `/invsee` + `/bal` polling paused; resumes automatically when player comes back online.",
+          "**Command channel:** Bot status • `/bal` poll results • Kicks • Hub rejoins • Proxy failures",
         ].join("\n"),
       },
     ]);
@@ -1606,12 +1500,10 @@ discord.on("messageCreate", async msg => {
     const mcCmd = cat ? `/skillstop ${cat}` : "/skillstop";
     const label = cat ? `${cat.charAt(0).toUpperCase() + cat.slice(1)} Skills Top` : "Overall Skills Top";
     await msg.react("⏳").catch(() => {});
-    // Use smart capture — /skillstop may open a GUI ("Leaderboard (Page 1)")
-    const result = await capture(mcCmd, 6000);
+    const result = await captureOnlyChat(mcCmd, 4000);
     stats.commandsRun++;
     msg.reactions.cache.get("⏳")?.users.remove(discord.user.id).catch(() => {});
-    if (result.type === "gui") return replyGuiContents(msg, mcCmd, result.items);
-    return replyFormatted(msg, `📊 ${label}`, result.text, 0x5865f2);
+    return replyFormatted(msg, `📊 ${label}`, result, 0x5865f2);
   }
 
   if (cmd === "compare") {
