@@ -1,2 +1,5 @@
 node_modules/
-.env
+# Hey! Added these to keep the repo clean:
+data.json
+package-lock.json
+package.json
